@@ -849,6 +849,11 @@ defmodule Unpickler do
     end
   end
 
+  defp built_in_resolver(%{constructor: "_codecs.encode", args: [binary, "latin1"]}) do
+    # In protocol <= 2 bytes are stored as a string and deserialized by encoding
+    {:ok, :unicode.characters_to_binary(binary, :utf8, :latin1)}
+  end
+
   defp built_in_resolver(_), do: :error
 
   defp read_line(binary) do
