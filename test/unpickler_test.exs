@@ -459,4 +459,13 @@ defmodule UnpicklerTest do
 
     assert Unpickler.load!(data) == {%Unpickler.Global{scope: "datetime", name: "date"}, ""}
   end
+
+  test "protocol 1 bytes" do
+    data =
+      <<99, 95, 99, 111, 100, 101, 99, 115, 10, 101, 110, 99, 111, 100, 101, 10, 113, 0, 40, 88,
+        3, 0, 0, 0, 195, 191, 1, 113, 1, 88, 6, 0, 0, 0, 108, 97, 116, 105, 110, 49, 113, 2, 116,
+        113, 3, 82, 113, 4, 46>>
+
+    assert Unpickler.load!(data) == {<<255, 1>>, ""}
+  end
 end
