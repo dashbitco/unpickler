@@ -118,7 +118,7 @@ defmodule Unpickler do
 
   """
   @spec load!(binary(), keyword()) :: {term(), rest :: binary()}
-  def load!(binary, opts \\ []) do
+  def load!(binary, opts \\ []) when is_binary(binary) and is_list(opts) do
     object_resolver = opts[:object_resolver]
     persistent_id_resolver = opts[:persistent_id_resolver]
 
