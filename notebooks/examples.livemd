@@ -1,0 +1,332 @@
+<!-- livebook:{"persist_outputs":true} -->
+
+# Examples
+
+```elixir
+Mix.install([
+  {:unpickler, "~> 0.1.0"},
+  {:nx, "~> 0.4.0"}
+])
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:ok
+```
+
+## Setup
+
+We will first define a helper macro to automatically generate a pickle binary from example Python code.
+
+```elixir
+defmodule Pickle do
+  @doc """
+  Runs the given Python code and returns the pickle binary.
+
+  The code must define a variable `x` and that value is pickled.
+
+  Optionally, a numeric sigil modifier may be given indicating
+  the pickle version to use, defaults to version 4.
+
+  Note that a `python` executable must be available.
+
+  ## Examples
+
+      iex> import Pickle
+      iex> ~P'''
+      ...> x = 1
+      ...> '''
+      <<128, 4, 75, 1, 46>>
+
+  """
+  defmacro sigil_P({:<<>>, _meta, [code]}, modifiers) do
+    protocol =
+      case modifiers do
+        [] -> 4
+        [version] -> version - ?0
+      end
+
+    code = """
+    import pickle
+    import base64
+
+    #{code}
+
+    data = pickle.dumps(x, protocol=#{protocol})
+    encoded = base64.b32encode(data).decode("utf-8")
+    print(encoded, end="")
+    """
+
+    {encoded, 0} = System.cmd("python", ["-c", code])
+    binary = Base.decode32!(encoded)
+    Macro.escape(binary)
+  end
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+1 doctest, 0 failures
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:module, Pickle, <<70, 79, 82, 49, 0, 0, 11, ...>>, {:sigil_P, 2}}
+```
+
+```elixir
+import Pickle
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+Pickle
+```
+
+## Basic data structures
+
+```elixir
+~P"""
+x = 1
+"""
+|> Unpickler.load!()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{1, ""}
+```
+
+```elixir
+~P"""
+x = [1, 2, 3]
+"""
+|> Unpickler.load!()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{[1, 2, 3], ""}
+```
+
+```elixir
+~P"""
+x = [1, 2.0, "text", (None, True), {"key": "val"}, b"\x01\x00"]
+"""
+|> Unpickler.load!()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{[1, 2.0, "text", {nil, true}, %{"key" => "val"}, <<1, 0>>], ""}
+```
+
+## Custom object resolver
+
+All non-trivial objects are deserialized as `%Unpickler.Object{}` structs. For example let's consider a date object:
+
+```elixir
+~P"""
+from datetime import date
+x = date.fromisoformat("2022-05-17")
+"""
+|> Unpickler.load!()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{%Unpickler.Object{
+   constructor: "datetime.date",
+   args: [<<7, 230, 5, 17>>],
+   kwargs: %{},
+   state: nil,
+   append_items: [],
+   set_items: []
+ }, ""}
+```
+
+However, ideally we would want to load that object as Elixir `%Date{}`. To do that, we can specify an object resolver:
+
+```elixir
+object_resolver = fn
+  # See https://github.com/python/cpython/blob/3.10/Lib/datetime.py#L1094-L1105
+  %Unpickler.Object{constructor: "datetime.date", args: [<<year_hi, year_lo, month, day>>]} ->
+    {:ok, date} = Date.new(year_hi * 256 + year_lo, month, day)
+    {:ok, date}
+
+  _ ->
+    :error
+end
+
+~P"""
+from datetime import date
+x = date.fromisoformat("2022-05-17")
+"""
+|> Unpickler.load!(object_resolver: object_resolver)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{~D[2022-05-17], ""}
+```
+
+Note that `%Unpickler.Object{}` has a number of different fields, that's because Python objects may define multiple ways of serializing themselves and we gather all the information under a single unified struct. This way we can easily pattern match on it in the object resolver.
+
+When deserializing complex objects you generally need to look at the corresponding Python source code and reverse-engineer how to load them accordingly. Here are a couple examples:
+
+```elixir
+~P"""
+class Point:
+  def __init__(self, x, y):
+    self.x = x
+    self.y = y
+
+x = Point(1, 1)
+"""
+|> Unpickler.load!()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{%Unpickler.Object{
+   constructor: "__main__.Point.__new__",
+   args: [%Unpickler.Global{scope: "__main__", name: "Point"}],
+   kwargs: %{},
+   state: %{"x" => 1, "y" => 1},
+   append_items: [],
+   set_items: []
+ }, ""}
+```
+
+```elixir
+~P"""
+class Point:
+  def __init__(self, x, y):
+    self.x = x
+    self.y = y
+
+  def __reduce__(self):
+    return (Point, (self.x, self.y))
+
+x = Point(1, 1)
+"""
+|> Unpickler.load!()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{%Unpickler.Object{
+   constructor: "__main__.Point",
+   args: [1, 1],
+   kwargs: %{},
+   state: nil,
+   append_items: [],
+   set_items: []
+ }, ""}
+```
+
+```elixir
+~P"""
+class Point:
+  def __init__(self, x, y):
+    self.x = x
+    self.y = y
+
+  @classmethod
+  def _reconstruct(cls, x, y):
+    return cls(x, y)
+
+  def __reduce__(self):
+    return (Point._reconstruct, (self.x, self.y))
+
+x = Point(1, 1)
+"""
+|> Unpickler.load!()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{%Unpickler.Object{
+   constructor: "__main__.Point._reconstruct",
+   args: [1, 1],
+   kwargs: %{},
+   state: nil,
+   append_items: [],
+   set_items: []
+ }, ""}
+```
+
+```elixir
+~P"""
+class Point:
+  def __init__(self, x, y):
+    self.x = x
+    self.y = y
+
+  def __getstate__(self):
+    return (self.x, self.y)
+
+  def __setstate__(self, state):
+    (x, y) = state
+    self.x = x
+    self.y = y
+
+x = Point(1, 1)
+"""
+|> Unpickler.load!()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{%Unpickler.Object{
+   constructor: "__main__.Point.__new__",
+   args: [%Unpickler.Global{scope: "__main__", name: "Point"}],
+   kwargs: %{},
+   state: {1, 1},
+   append_items: [],
+   set_items: []
+ }, ""}
+```
+
+```elixir
+~P"""
+class Point:
+  def __init__(self, x, y):
+    self.x = x
+    self.y = y
+
+  def __reduce__(self):
+    append_iter = iter([1, 2])
+    set_iter = iter([("a", 1), ("b", 2)])
+    return (Point, (self.x, self.y), None, append_iter, set_iter)
+
+x = Point(1, 1)
+"""
+|> Unpickler.load!()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{%Unpickler.Object{
+   constructor: "__main__.Point",
+   args: [1, 1],
+   kwargs: %{},
+   state: nil,
+   append_items: [1, 2],
+   set_items: [{"a", 1}, {"b", 2}]
+ }, ""}
+```
